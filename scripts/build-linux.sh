@@ -71,6 +71,17 @@ mkdir -p "$RELEASE_DIR"
 cp "$BINARY" "$RELEASE_DIR/MasterDnsWeb"
 chmod +x "$RELEASE_DIR/MasterDnsWeb"
 
+# Copy the systemd service template next to the binary
+if [ -f "$ROOT_DIR/masterdnsweb.service.tmpl" ]; then
+    cp "$ROOT_DIR/masterdnsweb.service.tmpl" "$RELEASE_DIR/masterdnsweb.service.tmpl"
+    echo "==> Included systemd service template"
+else
+    echo ""
+    echo "WARNING: masterdnsweb.service.tmpl not found at project root."
+    echo "  The panel will not be able to auto-create the systemd service on first run."
+    echo ""
+fi
+
 if [ -n "$VPN_BINARY" ]; then
     cp "$VPN_BINARY" "$RELEASE_DIR/MasterDnsVPN"
     chmod +x "$RELEASE_DIR/MasterDnsVPN"
