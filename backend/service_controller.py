@@ -26,6 +26,7 @@ except ModuleNotFoundError:
 		return False
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel
 
 from user import get_current_username
 
