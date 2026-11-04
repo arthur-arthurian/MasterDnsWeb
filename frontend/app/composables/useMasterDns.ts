@@ -532,6 +532,34 @@ export const useMasterDns = () => {
 
   const binaryVersion = useState<string | null>('dns.binaryVersion', () => null)
 
+  const fetchRuntimeLimit = async (id: string) => {
+    const result = await $fetch<{ seconds: number | null }>(
+      `/service/${encodeURIComponent(id)}/runtime-limit`,
+      {
+        ...fetchOptions,
+        method: "GET",
+      }
+    )
+    return result.seconds ?? null
+  }
+
+  const updateRuntimeLimit = async (id: string, seconds: number | null) => {
+    await $fetch(`/service/${encodeURIComponent(id)}/runtime-limit`, {
+      ...fetchOptions,
+      method: "POST",
+      body: { seconds },
+    })
+    await loadInstances(true)
+  }
+
+  const removeRuntimeLimit = async (id: string) => {
+    await $fetch(`/service/${encodeURIComponent(id)}/runtime-limit`, {
+      ...fetchOptions,
+      method: "DELETE",
+    })
+    await loadInstances(true)
+  }
+
   const fetchBinaryVersion = async () => {
     try {
       const result = await $fetch<{ version: string | null }>('/service/binary-version', {
@@ -627,5 +655,8 @@ export const useMasterDns = () => {
     importInstance,
     exportAllInstances,
     importAllInstances,
+    fetchRuntimeLimit,
+    updateRuntimeLimit,
+    removeRuntimeLimit,
   }
 }

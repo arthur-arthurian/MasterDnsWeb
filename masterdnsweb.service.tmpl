@@ -1,0 +1,13 @@
+[Unit]
+Description=MasterDnsWeb Panel
+After=network.target
+
+[Service]
+WorkingDirectory={WORK_DIR}
+ExecStart={BIN_PATH}
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target

@@ -1,5 +1,8 @@
 from pathlib import Path
+import json
 import os
+import shutil
+import subprocess
 import sys
 
 try:
@@ -132,7 +135,137 @@ def spa_fallback(full_path: str):
 
     return serve_frontend(full_path)
 
+def _find_service_template() -> Path | None:
+    """Locate the systemd unit template file.
+
+    Priority:
+    1. Next to the source file (project root) in development.
+    2. Next to the frozen executable (PyInstaller bundle).
+    3. Current working directory as a fallback.
+    """
+    candidates = [
+        Path(__file__).resolve().parent.parent / "masterdnsweb.service.tmpl",
+    ]
+    if getattr(sys, "frozen", False):
+        candidates.append(Path(sys.executable).resolve().parent / "masterdnsweb.service.tmpl")
+    candidates.append(Path.cwd() / "masterdnsweb.service.tmpl")
+
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return None
+
+
+def _extract_listen_port_from_profile(file_path: Path) -> int | None:
+    """Extract LISTEN_PORT from a profile JSON file."""
+    try:
+        data = json.loads(file_path.read_text(encoding="utf-8"))
+        configure = data.get("configure", {})
+        port = configure.get("LISTEN_PORT")
+        if port is not None:
+            return int(port)
+    except Exception:
+        pass
+    return None
+
+
+def apply_iptables_for_instances() -> None:
+    """Apply iptables rules for all instance listen ports.
+
+    For every unique LISTEN_PORT found in data/*.json profiles:
+
+        iptables -A INPUT -p tcp --dport <port> -j DROP
+        iptables -A INPUT -p tcp -s 127.0.0.1 --dport <port> -j ACCEPT
+
+    Runs only if iptables binary exists. Duplicate rules are skipped using
+    iptables -C (check) before appending so restarting the panel does not
+    pile up identical rules.
+    """
+    if shutil.which("iptables") is None:
+        print("[iptables] iptables binary not found, skipping firewall rules")
+        return
+
+    try:
+        data_dir = Path(__file__).resolve().parent.parent / "data"
+        if not data_dir.exists():
+            return
+
+        ports: set[int] = set()
+        for profile_file in data_dir.glob("*.json"):
+            port = _extract_listen_port_from_profile(profile_file)
+            if port is not None:
+                ports.add(port)
+
+        for port in sorted(ports):
+            # Rule 1: Drop all external TCP traffic to the instance port
+            check_drop = [
+                "iptables", "-C", "INPUT", "-p", "tcp",
+                "--dport", str(port), "-j", "DROP",
+            ]
+            if subprocess.run(check_drop, capture_output=True, check=False).returncode != 0:
+                subprocess.run(
+                    ["iptables", "-A", "INPUT", "-p", "tcp",
+                     "--dport", str(port), "-j", "DROP"],
+                    check=False,
+                )
+
+            # Rule 2: Allow localhost to reach the instance port
+            check_accept = [
+                "iptables", "-C", "INPUT", "-p", "tcp",
+                "-s", "127.0.0.1", "--dport", str(port), "-j", "ACCEPT",
+            ]
+            if subprocess.run(check_accept, capture_output=True, check=False).returncode != 0:
+                subprocess.run(
+                    ["iptables", "-A", "INPUT", "-p", "tcp",
+                     "-s", "127.0.0.1", "--dport", str(port), "-j", "ACCEPT"],
+                    check=False,
+                )
+
+        print(f"[iptables] Applied rules for ports: {sorted(ports)}")
+    except Exception as exc:
+        # Non-fatal: the panel can still run without iptables rules
+        print(f"[iptables] Could not apply firewall rules: {exc}")
+
+
+def ensure_systemd_service() -> None:
+    """Create and enable a systemd service for MasterDnsWeb on first run.
+
+    Only runs for the frozen (PyInstaller) binary. If the unit file already
+    exists it does nothing, so repeated starts are safe.
+    """
+    if not getattr(sys, "frozen", False):
+        return
+
+    try:
+        bin_path = Path(sys.executable).resolve()
+        work_dir = bin_path.parent
+        unit_path = Path("/etc/systemd/system/masterdnsweb.service")
+
+        if unit_path.exists():
+            return
+
+        template_path = _find_service_template()
+        if template_path is None:
+            print("[systemd] Template file not found, skipping service creation")
+            return
+
+        template = template_path.read_text(encoding="utf-8")
+        unit_content = template.format(WORK_DIR=str(work_dir), BIN_PATH=str(bin_path))
+
+        unit_path.write_text(unit_content, encoding="utf-8")
+
+        subprocess.run(["systemctl", "daemon-reload"], check=False)
+        subprocess.run(["systemctl", "enable", "masterdnsweb.service"], check=False)
+
+        print(f"[systemd] Created and enabled {unit_path}")
+    except Exception as exc:
+        # Non-fatal: the panel can still run without the systemd service
+        print(f"[systemd] Could not create service: {exc}")
+
+
 if __name__ == "__main__":
+    ensure_systemd_service()
+    apply_iptables_for_instances()
     import uvicorn
     uvicorn.run(
         app,

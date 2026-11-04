@@ -422,6 +422,91 @@ class ServiceController:
 			) from exc
 
 	@classmethod
+	def runtime_override_dir(cls, name: str) -> Path:
+		validated_name = cls.validate_name(name)
+		return cls.systemd_dir() / f"{cls.unit_name(validated_name)}.d"
+
+	@classmethod
+	def write_runtime_limit_override(cls, name: str, seconds: int) -> Path:
+		validated_name = cls.validate_name(name)
+		override_dir = cls.runtime_override_dir(validated_name)
+		override_dir.mkdir(parents=True, exist_ok=True)
+
+		override_path = override_dir / "override.conf"
+		content = f"[Service]\nRuntimeMaxSec={seconds}\n"
+
+		try:
+			if cls._can_write_to_directory(override_path.parent):
+				override_path.write_text(content, encoding="utf-8")
+			else:
+				with tempfile.NamedTemporaryFile(
+					"w", encoding="utf-8", delete=False
+				) as temp_file:
+					temp_file.write(content)
+					temp_path = Path(temp_file.name)
+
+				try:
+					cls._run_command(
+						["install", "-m", "644", str(temp_path), str(override_path)]
+					)
+				finally:
+					temp_path.unlink(missing_ok=True)
+		except OSError as exc:
+			raise HTTPException(
+				status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+				detail=f"Error writing runtime limit override: {exc}",
+			) from exc
+
+		return override_path
+
+	@classmethod
+	def remove_runtime_limit_override(cls, name: str) -> None:
+		validated_name = cls.validate_name(name)
+		override_dir = cls.runtime_override_dir(validated_name)
+		override_path = override_dir / "override.conf"
+
+		if not override_path.exists():
+			return
+
+		try:
+			if cls._can_write_to_directory(override_path.parent):
+				override_path.unlink()
+			else:
+				cls._run_command(["rm", "-f", str(override_path)])
+		except OSError as exc:
+			raise HTTPException(
+				status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+				detail=f"Error removing runtime limit override: {exc}",
+			) from exc
+
+		# Remove the .d directory if it is now empty
+		try:
+			if override_dir.exists() and not any(override_dir.iterdir()):
+				if cls._can_write_to_directory(override_dir):
+					override_dir.rmdir()
+				else:
+					cls._run_command(["rmdir", str(override_dir)])
+		except OSError:
+			pass
+
+	@classmethod
+	def apply_runtime_limit(cls, name: str, seconds: int | None) -> None:
+		validated_name = cls.validate_name(name)
+
+		if seconds is None:
+			cls.remove_runtime_limit_override(validated_name)
+		else:
+			if seconds < 1:
+				raise HTTPException(
+					status_code=status.HTTP_400_BAD_REQUEST,
+					detail="RuntimeMaxSec must be at least 1 second",
+				)
+			cls.write_runtime_limit_override(validated_name, seconds)
+
+		cls.daemon_reload()
+		cls.restart(validated_name)
+
+	@classmethod
 	def daemon_reload(cls) -> None:
 		cls._run_systemctl(["daemon-reload"])
 
@@ -661,3 +746,50 @@ def get_service_status(name: str):
 @service_router.get("/{name}/logs")
 def get_service_logs(name: str, lines: int = Query(default=100, ge=1, le=2000)):
 	return ServiceController.logs(name, lines)
+
+
+@service_router.get("/{name}/runtime-limit")
+def get_runtime_limit(name: str):
+	"""Return the current RuntimeMaxSec (seconds) for an instance."""
+	validated = ServiceController.validate_name(name)
+	data_dir = Path(__file__).resolve().parent.parent / "data"
+	file_path = data_dir / f"{validated}.json"
+	if not file_path.exists():
+		raise HTTPException(
+			status_code=status.HTTP_404_NOT_FOUND,
+			detail=f"Profile '{validated}' not found",
+		)
+	try:
+		data = json.loads(file_path.read_text(encoding="utf-8"))
+		return {"seconds": data.get("runtime_max_sec")}
+	except (OSError, json.JSONDecodeError) as exc:
+		raise HTTPException(
+			status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+			detail=f"Cannot read profile '{validated}': {exc}",
+		) from exc
+
+
+class RuntimeLimitRequest(BaseModel):
+	seconds: int | None = None
+
+
+@service_router.post("/{name}/runtime-limit")
+def set_runtime_limit(name: str, request: RuntimeLimitRequest):
+	"""Set or remove RuntimeMaxSec for an instance and apply it via systemd override."""
+	ServiceController.apply_runtime_limit(name, request.seconds)
+	return {
+		"status": "success",
+		"message": f"Runtime limit for '{name}' set to {request.seconds} seconds",
+		"seconds": request.seconds,
+	}
+
+
+@service_router.delete("/{name}/runtime-limit")
+def delete_runtime_limit(name: str):
+	"""Remove RuntimeMaxSec override for an instance."""
+	ServiceController.apply_runtime_limit(name, None)
+	return {
+		"status": "success",
+		"message": f"Runtime limit for '{name}' removed",
+		"seconds": None,
+	}

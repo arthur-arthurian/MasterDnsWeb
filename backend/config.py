@@ -61,6 +61,7 @@ class CreateProfileRequest(BaseModel):
     name: str
     configure: ClientConfig
     resolver: list[str]
+    runtime_max_sec: int | None = None
 
     @field_validator("name")
     @classmethod
@@ -85,6 +86,7 @@ class UpdateProfileRequest(BaseModel):
 
     configure: ClientConfig
     resolver: list[str]
+    runtime_max_sec: int | None = None
 
     @field_validator("resolver")
     @classmethod
@@ -126,12 +128,20 @@ class ConfigCRUD:
             )
 
     @staticmethod
-    def serialize_payload(name: str, configure: ClientConfig, resolver: list[str]) -> dict[str, Any]:
-        return {
+    def serialize_payload(
+        name: str,
+        configure: ClientConfig,
+        resolver: list[str],
+        runtime_max_sec: int | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
             "name": name,
             "configure": configure.model_dump(),
             "resolver": resolver,
         }
+        if runtime_max_sec is not None:
+            payload["runtime_max_sec"] = runtime_max_sec
+        return payload
 
     @staticmethod
     def write_profile(file_path: Path, payload: dict[str, Any], action: str) -> None:
@@ -164,7 +174,9 @@ class ConfigCRUD:
         file_path = profile_file_path(name)
         cls.ensure_not_exists(file_path, name)
 
-        payload = cls.serialize_payload(name, request.configure, request.resolver)
+        payload = cls.serialize_payload(
+            name, request.configure, request.resolver, request.runtime_max_sec
+        )
         cls.write_profile(file_path, payload, "creating")
 
         try:
@@ -191,7 +203,21 @@ class ConfigCRUD:
         file_path = profile_file_path(validated_name)
         cls.ensure_exists(file_path, validated_name)
 
-        payload = cls.serialize_payload(validated_name, request.configure, request.resolver)
+        # Preserve existing runtime_max_sec if the caller did not provide a new value
+        existing = cls.read_profile(file_path)
+        existing_runtime_max_sec = existing.get("runtime_max_sec")
+        new_runtime_max_sec = (
+            request.runtime_max_sec
+            if request.runtime_max_sec is not None
+            else existing_runtime_max_sec
+        )
+
+        payload = cls.serialize_payload(
+            validated_name,
+            request.configure,
+            request.resolver,
+            new_runtime_max_sec,
+        )
         cls.write_profile(file_path, payload, "updating")
 
         service_data = ServiceController.sync_after_update(validated_name)

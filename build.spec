@@ -13,6 +13,12 @@ datas = []
 if static_dir.exists():
     datas.append((str(static_dir), "static"))
 
+# Bundle the systemd unit template next to the executable so the first-run
+# service installer can read it.
+template_path = Path("masterdnsweb.service.tmpl")
+if template_path.exists():
+    datas.append((str(template_path), "."))
+
 a = Analysis(
     [str(backend_dir / "main.py")],
     pathex=[str(backend_dir)],

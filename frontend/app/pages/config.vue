@@ -5,7 +5,7 @@ definePageMeta({
 
 const route = useRoute()
 const toast = useToast()
-const { instances, loadInstances, isLoading, updateInstanceConfig } = useMasterDns()
+const { instances, loadInstances, isLoading, updateInstanceConfig, fetchRuntimeLimit, updateRuntimeLimit, removeRuntimeLimit } = useMasterDns()
 
 const instanceId = computed(() => route.query.instance as string)
 const currentInstance = computed(() => {
@@ -17,6 +17,8 @@ const tomlText = ref(currentInstance.value?.config_toml || '')
 const resolverText = ref(currentInstance.value?.resolvers.join('\n') || '')
 const isApplying = ref(false)
 const tomlError = ref('')
+const runtimeMaxSec = ref<number | null>(null)
+const isApplyingRuntime = ref(false)
 
 watch(
   currentInstance,
@@ -25,6 +27,9 @@ watch(
       tomlText.value = newInstance.config_toml
       resolverText.value = newInstance.resolvers.join('\n')
       tomlError.value = ''
+      void fetchRuntimeLimit(newInstance.id).then((seconds) => {
+        runtimeMaxSec.value = seconds ?? null
+      })
     }
   },
   { immediate: true }
@@ -33,6 +38,11 @@ watch(
 onMounted(async () => {
   try {
     await loadInstances()
+    if (instanceId.value) {
+      void fetchRuntimeLimit(instanceId.value).then((seconds) => {
+        runtimeMaxSec.value = seconds ?? null
+      })
+    }
   }
   catch (error: any) {
     toast.add({
@@ -149,6 +159,41 @@ function validateToml(toml: string): boolean {
   return true
 }
 
+async function applyRuntimeLimit() {
+  if (!currentInstance.value) return
+  isApplyingRuntime.value = true
+  try {
+    const seconds = runtimeMaxSec.value
+    if (seconds === null || seconds === undefined || seconds < 1) {
+      await removeRuntimeLimit(currentInstance.value.id)
+      runtimeMaxSec.value = null
+      useToast().add({
+        title: 'Runtime limit removed',
+        description: 'RuntimeMaxSec override was removed for this instance.',
+        icon: 'i-lucide-trash-2',
+        color: 'info',
+      })
+    } else {
+      await updateRuntimeLimit(currentInstance.value.id, Math.floor(seconds))
+      useToast().add({
+        title: 'Runtime limit applied',
+        description: `RuntimeMaxSec set to ${Math.floor(seconds)} seconds.`,
+        icon: 'i-lucide-clock',
+        color: 'success',
+      })
+    }
+  } catch (error: any) {
+    useToast().add({
+      title: 'Failed to apply runtime limit',
+      description: error?.data?.detail || 'Could not apply runtime limit.',
+      icon: 'i-lucide-circle-alert',
+      color: 'error',
+    })
+  } finally {
+    isApplyingRuntime.value = false
+  }
+}
+
 async function applyConfig() {
   if (!currentInstance.value) return
 
@@ -249,6 +294,67 @@ async function applyConfig() {
     </div>
 
     <div class="grid grid-cols-1 gap-6 lg:grid-cols-3">
+      <div class="lg:col-span-1 space-y-4">
+        <UCard>
+          <template #header>
+            <div class="flex items-center justify-between gap-3">
+              <div class="flex items-center gap-2">
+                <UIcon name="i-lucide-clock" class="h-4 w-4 text-neutral-500" />
+                <span class="text-sm font-semibold text-neutral-900 dark:text-white">Runtime Limit</span>
+              </div>
+            </div>
+          </template>
+
+          <div class="space-y-3">
+            <div>
+              <label class="block text-xs font-medium text-neutral-700 dark:text-neutral-300 mb-1">
+                RuntimeMaxSec (seconds)
+              </label>
+              <UInput
+                v-model="runtimeMaxSec"
+                type="number"
+                min="1"
+                placeholder="e.g. 900"
+                class="w-full"
+              />
+              <p class="text-[10px] text-neutral-500 dark:text-neutral-400 mt-1">
+                After this many seconds, systemd will stop the instance and start it again automatically.
+              </p>
+            </div>
+
+            <div class="flex gap-2">
+              <UButton
+                @click="applyRuntimeLimit"
+                :loading="isApplyingRuntime"
+                icon="i-lucide-save"
+                size="sm"
+              >
+                Apply
+              </UButton>
+              <UButton
+                v-if="runtimeMaxSec !== null"
+                @click="() => { runtimeMaxSec.value = null; void applyRuntimeLimit() }"
+                icon="i-lucide-trash-2"
+                color="error"
+                variant="outline"
+                size="sm"
+              >
+                Remove
+              </UButton>
+            </div>
+
+            <div v-if="currentInstance.value && runtimeMaxSec.value !== null" class="pt-2">
+              <div class="flex items-center gap-1">
+                <UIcon name="i-lucide-info" class="h-3 w-3 text-neutral-400" />
+                <span class="text-xs text-neutral-600 dark:text-neutral-400">
+                  Current: {{ runtimeMaxSec.value }} seconds
+                </span>
+              </div>
+            </div>
+          </div>
+        </UCard>
+      </div>
+
       <div class="lg:col-span-2 space-y-4">
         <UCard>
           <template #header>
